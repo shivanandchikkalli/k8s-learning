@@ -25,8 +25,14 @@
 | 13 | Production Troubleshooting | [day-13-troubleshooting](./day-13-troubleshooting/README.md) | ⬜ |
 | 14 | AWS EKS | [day-14-eks](./day-14-eks/README.md) | ⬜ |
 | 15 | Staff-Level Architecture & Interview | [day-15-architecture-interview](./day-15-architecture-interview/README.md) | ⬜ |
+| + | Helm Deep Dive (companion, staff-level) | [helm-deep-dive](./helm-deep-dive/README.md) | ⬜ |
+| + | Terraform Deep Dive (companion, staff-level) | [terraform-deep-dive](./terraform-deep-dive/README.md) | ⬜ |
 
 Mark ⬜ → ✅ as you complete each day. Each day folder has its own checklist, hands-on labs, and interview questions.
+
+Helm basics are introduced inline on Days 9, 12, and 14 (installing charts as you touch storage, security tooling, and EKS). The [helm-deep-dive](./helm-deep-dive/README.md) track covers chart authoring, templating, hooks, and testing for staff-level depth — work through it alongside Days 9–14.
+
+Terraform basics are introduced inline on Day 14 (provisioning the EKS cluster, VPC, and IAM/IRSA trust as code). The [terraform-deep-dive](./terraform-deep-dive/README.md) track covers state management, modules, workspaces, drift, and the Terraform/Kubernetes boundary for staff-level depth — work through it alongside Day 14.
 
 ---
 

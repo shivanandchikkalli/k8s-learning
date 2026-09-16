@@ -215,8 +215,36 @@ kubectl run root-test -n dev-team --image=nginx --overrides='{"spec":{"container
 # Error: violates PodSecurity "restricted"
 ```
 
-## 9. Interview Points
+## 10. Installing Security Tooling via Helm
+
+Most CNCF security tools ship only as Helm charts — this is how they're installed in practice:
+
+```bash
+# cert-manager
+helm repo add jetstack https://charts.jetstack.io
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager --create-namespace \
+  --set installCRDs=true
+
+# external-secrets operator
+helm repo add external-secrets https://charts.external-secrets.io
+helm install external-secrets external-secrets/external-secrets \
+  --namespace external-secrets --create-namespace
+
+# Kyverno (policy engine)
+helm repo add kyverno https://kyverno.github.io/kyverno/
+helm install kyverno kyverno/kyverno --namespace kyverno --create-namespace
+```
+
+**Staff-level point:** for security-critical charts, always pin the chart version
+(`--version x.y.z`) and diff CRDs before upgrading — a Helm upgrade can silently
+change CRD schemas (e.g., cert-manager) and break existing custom resources if
+you don't review the changelog first. Helm does **not** upgrade or delete CRDs on
+`helm upgrade` by default — only on a fresh `install`.
+
+## 11. Interview Points
 - "RBAC answers 'who can do what' — Role/RoleBinding for namespace scope, ClusterRole/ClusterRoleBinding for cluster scope; ClusterRole+RoleBinding is a common pattern for reusable permission sets applied per-namespace."
 - "ServiceAccounts are Pod identities — I always create a dedicated, minimally-scoped SA per app rather than relying on `default`."
 - "Kubernetes networking is open by default — NetworkPolicy is required for real isolation, starting with default-deny and adding explicit allows."
 - "Defense in depth for multi-tenancy = namespace + quota + RBAC + NetworkPolicy + Pod Security Admission, layered together, not any single control alone."
+- "I pin Helm chart versions for security tooling and always check CRD diffs before upgrading — CRD drift is a common source of silent breakage."

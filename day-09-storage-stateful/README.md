@@ -185,7 +185,47 @@ kubectl run dns-test --image=busybox --rm -it --restart=Never -- \
   nslookup web-0.web-headless.default.svc.cluster.local
 ```
 
-## 7. Interview Points
+## 7. Helm Basics — Installing & Managing Charts
+
+### Why Helm Exists
+Raw YAML doesn't parameterize well across environments (dev/staging/prod) and has no
+versioning/rollback story for a *release* as a unit (a Deployment + Service + ConfigMap
++ Secret shipped/rolled-back together). Helm solves this with **charts** (templated
+packages) and **releases** (a named, versioned instance of a chart's values).
+
+### Core Workflow
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+helm search repo postgresql
+
+helm install my-postgres bitnami/postgresql \
+  --namespace database --create-namespace \
+  --set auth.postgresPassword=secret \
+  --set primary.persistence.size=20Gi
+
+helm list -n database
+helm status my-postgres -n database
+helm get values my-postgres -n database        # what values are actually in effect
+helm get manifest my-postgres -n database       # the rendered YAML that was applied
+
+helm upgrade my-postgres bitnami/postgresql -f values-prod.yaml -n database
+helm rollback my-postgres 1 -n database          # roll back to revision 1
+helm uninstall my-postgres -n database
+```
+
+### Release = State, Not Just Templates
+Every `install`/`upgrade` creates a new **revision**, stored as a Secret in the
+release's namespace (`sh.helm.release.v1.<name>.v<N>`). This is what makes
+`helm rollback` possible — Helm diffs against the last known-good rendered manifest,
+not just against your `values.yaml`.
+
+For a full staff-level treatment of chart authoring (templating, hooks, library
+charts, testing, OCI publishing), see [helm-deep-dive/README.md](../helm-deep-dive/README.md).
+
+## 8. Interview Points
 - "PV/PVC decouples storage lifecycle from Pod lifecycle — the Pod is disposable, the data isn't."
 - "StorageClass + dynamic provisioning means developers just request storage by class/size; the actual cloud disk gets created automatically."
 - "I use StatefulSet only when I need stable network identity AND stable per-replica storage — for stateless apps, Deployment is simpler and sufficient."
+- "Helm's release model gives me versioned, rollback-able deployments of a full set of resources as a unit — that's what plain `kubectl apply` doesn't provide."

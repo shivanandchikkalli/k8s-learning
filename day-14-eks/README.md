@@ -135,8 +135,131 @@ kubectl get svc hello   # EXTERNAL-IP will be an AWS-provisioned ELB hostname
 eksctl delete cluster --name mastery-cluster --region us-east-1   # avoid ongoing charges
 ```
 
-## 12. Interview Points
+## 12. Provisioning EKS with Terraform (Instead of eksctl)
+
+`eksctl` is fine for quick labs, but production clusters are provisioned as code
+so the cluster, VPC, IAM roles, and node groups are versioned, reviewable, and
+reproducible. The standard approach uses the official
+`terraform-aws-modules/eks/aws` module rather than hand-rolling every resource.
+
+```hcl
+# file: main.tf
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  name = "mastery-vpc"
+  cidr = "10.0.0.0/16"
+
+  azs             = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+  enable_nat_gateway = true
+  single_nat_gateway = true   # cost-saving for non-prod; use one NAT per AZ for prod HA
+}
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.0"
+
+  cluster_name    = "mastery-cluster"
+  cluster_version = "1.31"
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  enable_cluster_creator_admin_permissions = true
+
+  eks_managed_node_groups = {
+    default = {
+      instance_types = ["t3.medium"]
+      min_size       = 2
+      max_size       = 4
+      desired_size   = 2
+    }
+  }
+}
+
+# IAM role for the AWS Load Balancer Controller, trusted via the cluster's OIDC provider
+module "lb_controller_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.0"
+
+  role_name                              = "aws-load-balancer-controller"
+  attach_load_balancer_controller_policy = true
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
+    }
+  }
+}
+```
+
+```bash
+terraform init
+terraform plan -out=tfplan     # ALWAYS review the plan before applying
+terraform apply tfplan
+
+aws eks update-kubeconfig --name mastery-cluster --region us-east-1
+kubectl get nodes
+
+terraform destroy              # tear down VPC + cluster + node groups together
+```
+
+### Why This Matters at Staff Level
+- **One `terraform plan`/`apply` provisions the VPC, cluster, node groups, and the
+  IAM role/OIDC trust for IRSA together** — no manual clicking in the AWS console,
+  no drift between environments.
+- The **module boundary matches the Terraform/Helm boundary from Section 13**:
+  Terraform owns the IAM role and its trust policy (`lb_controller_irsa`); Helm
+  only references the resulting ServiceAccount name — neither tool tries to own
+  the other's responsibility.
+- State (`terraform.tfstate`) should live in a **remote backend** (S3 + DynamoDB
+  lock table) for any shared/production cluster — local state is only acceptable
+  for solo learning labs like this one.
+
+```hcl
+# file: backend.tf — remote state for anything beyond a personal lab
+terraform {
+  backend "s3" {
+    bucket         = "my-org-terraform-state"
+    key            = "clusters/mastery-cluster/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-locks"
+    encrypt        = true
+  }
+}
+```
+
+For a full staff-level treatment of Terraform (state management, modules, workspaces,
+drift detection, import), see [terraform-deep-dive/README.md](../terraform-deep-dive/README.md).
+
+## 13. Installing the AWS Load Balancer Controller via Helm
+
+```bash
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
+
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  --namespace kube-system \
+  --set clusterName=mastery-cluster \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller
+```
+
+- `serviceAccount.create=false` because in production you pre-create the
+  ServiceAccount via Terraform/IRSA with the correct IAM role annotation —
+  Helm should not own IAM-linked identity.
+- Standard pattern: **Terraform provisions the IAM role + OIDC trust, Helm installs
+  the controller referencing that pre-existing ServiceAccount.**
+
+## 14. Interview Points
 - "EKS gives you a fully AWS-managed, multi-AZ control plane — I only operate the data plane, which can be managed node groups, self-managed EC2, or Fargate for a fully serverless Pod experience."
 - "The AWS VPC CNI gives Pods real VPC IPs, which is what allows ALBs to target Pods directly — but it means IP address planning matters a lot more than with an overlay CNI."
 - "For AWS credentials in Pods, I use IRSA or EKS Pod Identity — never static keys — so permissions are scoped per-ServiceAccount and rotate automatically."
 - "I'd choose ECS for AWS-only simplicity, EKS when I need portability, a broader ecosystem, or the org already has Kubernetes skills to leverage."
+- "I install vendor components like the AWS Load Balancer Controller via Helm, but let Terraform own the IAM role/ServiceAccount binding — infra identity shouldn't be owned by the app-layer tool."
+- "Terraform provisions the cluster, VPC, and IAM/OIDC trust as one reviewable plan — I never hand-create infrastructure that Terraform is supposed to own, or state drifts silently."
