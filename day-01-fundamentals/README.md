@@ -112,9 +112,67 @@ kubectl delete namespace learning
 2. API Server **authenticates** the caller (who are you?) and **authorizes** (RBAC — are you allowed?).
 3. Request passes through **admission controllers** (mutating, then validating) — may set defaults or reject invalid specs.
 4. API Server **persists** the object to **etcd** as the new desired state.
-5. **Scheduler** notices a Pod with no `nodeName` set, scores eligible nodes, binds the Pod to a chosen node (writes back to API Server/etcd).
-6. **kubelet** on that node is watching the API Server, sees a new Pod assigned to it, and instructs the **container runtime** (containerd) to pull the image and start the container(s).
-7. kubelet continuously reports Pod status back to the API Server, which updates etcd.
-8. Controllers (e.g., Deployment/ReplicaSet controller) keep watching to ensure actual state matches desired state indefinitely.
+5. **Scheduler** notices a Pod with no `spec.nodeName` set, filters and scores eligible nodes, then binds the Pod to a chosen node. The scheduler does not write to etcd directly: it sends the binding through the API Server, which persists the updated object to etcd.
+6. The **kubelet** on the selected node watches the API Server for Pods assigned to its `spec.nodeName`. It sees the assignment and instructs the **container runtime** (containerd) to pull the image and start the container(s).
+7. The kubelet continuously reports Pod and container status to the API Server. The API Server persists that status in etcd. Kubelets and controllers do not normally access etcd directly.
+8. Controllers (for example, the Deployment and ReplicaSet controllers) keep watching and reconciling so that actual state matches desired state indefinitely.
 
 **Key point for interviews:** `kubectl apply` never talks to a node directly — everything flows through the API Server, and the actual placement/execution happens asynchronously via the watch/reconcile pattern.
+
+### What does “assign the Pod to a node” mean?
+
+Initially, a newly created Pod has no `spec.nodeName`, so it is **Pending** and has not been assigned to a node. The scheduler evaluates the Pod's resource requests, node selectors, affinity rules, taints and tolerations, topology constraints, and other scheduling rules. It chooses a node and records that choice as `spec.nodeName` by calling the API Server. This is called **binding**.
+
+The selected kubelet maintains a watch on the API Server. The API Server sends it the relevant Pod event, or the kubelet observes the change when its watch is re-established. The kubelet then creates the Pod's sandbox and asks the container runtime to pull images and start containers. The kubelet does not learn the assignment by reading etcd directly.
+
+### What is a PodSpec?
+
+A **PodSpec** is the `spec` section of a Pod object: the desired description of how the Pod should run. It includes fields such as:
+
+- container names and images
+- ports, environment variables, volumes, and probes
+- resource requests and limits
+- node selectors, affinity, tolerations, and restart policy
+
+For example, in this manifest, the `containers` list and `restartPolicy` are part of the PodSpec:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.27-alpine
+  restartPolicy: Always
+```
+
+The kubelet uses the PodSpec as its instruction, while the Pod's `status` records what is actually happening. Kubernetes compares the two rather than treating a successful API request as proof that a container is already running.
+
+### What is the watch/reconcile pattern?
+
+- **Watch:** components subscribe to the API Server for changes to the objects they care about. For example, the scheduler watches unscheduled Pods, and a kubelet watches Pods assigned to its node.
+- **Reconcile:** a component compares the desired state in the API objects with the observed state, then takes an action to reduce the difference.
+
+This is asynchronous and continuous. A controller may create a replacement Pod, a scheduler may bind it, and a kubelet may restart a failed container. Each action produces another API event, and the loops continue until the desired and actual states converge. Components watch the API Server; the API Server is the boundary through which state is read and changed, with etcd providing persistence behind it.
+
+### What happens if a node goes down?
+
+1. The kubelet normally sends heartbeats through the API Server using a **Node Lease** and Node status updates. If those stop, the control plane eventually marks the node `NotReady`.
+2. The Node controller detects the failure and, subject to configured timing and workload rules, marks Pods on that node as failed or evicts them.
+3. If those Pods belong to a Deployment, ReplicaSet, or StatefulSet, its controller notices the missing replicas and creates replacement Pods. The scheduler can place replacements on healthy nodes.
+4. A standalone Pod created directly with `kubectl run` is not recreated by a Deployment or ReplicaSet controller. It may remain associated with the failed node until the node or Pod is handled, so production workloads are normally managed by a controller.
+
+The exact timing depends on node-monitor and eviction settings, and a temporary network partition can look like a node failure. Kubernetes cannot immediately know whether a silent node is destroyed or merely disconnected.
+
+### Is `kubectl run nginx --image=nginx` the same?
+
+The request still follows the same control-plane path: `kubectl` calls the API Server, authentication/authorization and admission run, the object is persisted, and then the scheduler and kubelet act asynchronously. The difference is how the desired object is created:
+
+| Command | Meaning |
+|---------|---------|
+| `kubectl apply -f pod.yaml` | Declarative: submit a complete manifest and repeatedly apply changes to that declared object. |
+| `kubectl run nginx --image=nginx` | Imperative: ask `kubectl` to construct and create a Pod from command-line arguments. |
+
+Both create a Pod that can be scheduled and run. `kubectl run` does not by itself create a Deployment or provide replica management, rolling updates, or replacement replicas. For a long-lived application, use a Deployment manifest or `kubectl create deployment` instead.
